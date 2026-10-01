@@ -8,6 +8,12 @@ const ROOT = __dirname;
 const clients = new Map();
 const players = new Map();
 const colors = ['#ff4d7d', '#38e8ff', '#ffc857', '#a978ff', '#63f59b', '#ff8b4d'];
+const weapons = {
+  pulse: { damage: 34, cooldown: 130, pellets: 1 },
+  burst: { damage: 18, cooldown: 260, pellets: 3 },
+  scatter: { damage: 12, cooldown: 620, pellets: 7 },
+  beam: { damage: 52, cooldown: 900, pellets: 1 }
+};
 const spawns = [
   { x: -24, z: -18 }, { x: 24, z: 18 }, { x: 24, z: -18 }, { x: -24, z: 18 },
   { x: 0, z: -25 }, { x: 0, z: 25 }
@@ -19,8 +25,8 @@ function spawnFor(index) {
 }
 
 function publicState() {
-  return [...players.values()].map(({ id, name, color, x, y, z, yaw, pitch, health, score, deaths, alive }) => ({
-    id, name, color, x, y, z, yaw, pitch, health, score, deaths, alive
+  return [...players.values()].map(({ id, name, color, x, y, z, yaw, pitch, health, score, deaths, alive, weapon }) => ({
+    id, name, color, x, y, z, yaw, pitch, health, score, deaths, alive, weapon
   }));
 }
 
@@ -67,7 +73,7 @@ const wss = new WebSocketServer({ server });
 wss.on('connection', (socket) => {
   const id = Math.random().toString(36).slice(2, 9);
   const position = spawnFor(players.size);
-  const player = { id, name: `Ranger-${id.slice(0, 3).toUpperCase()}`, color: colors[players.size % colors.length], ...position, yaw: 0, pitch: 0, health: 100, score: 0, deaths: 0, alive: true, lastShot: 0 };
+  const player = { id, name: `Ranger-${id.slice(0, 3).toUpperCase()}`, color: colors[players.size % colors.length], ...position, yaw: 0, pitch: 0, health: 100, score: 0, deaths: 0, alive: true, weapon: 'pulse', lastShot: 0 };
   clients.set(socket, id);
   players.set(id, player);
   send(socket, { type: 'welcome', id, players: publicState() });
@@ -85,19 +91,23 @@ wss.on('connection', (socket) => {
       current.z = Math.max(-31, Math.min(31, Number(message.z) || 0));
       current.yaw = Number(message.yaw) || 0;
       current.pitch = Number(message.pitch) || 0;
+      if (weapons[message.weapon]) current.weapon = message.weapon;
       if (typeof message.name === 'string' && message.name.trim()) current.name = message.name.trim().slice(0, 16);
     }
-    if (message.type === 'shoot' && current.alive && Date.now() - current.lastShot > 130) {
+    if (message.type === 'shoot' && current.alive && Date.now() - current.lastShot > (weapons[current.weapon]?.cooldown || 130)) {
       current.lastShot = Date.now();
-      const direction = message.direction || {};
+      const profile = weapons[current.weapon];
+      const directions = Array.isArray(message.directions) ? message.directions.slice(0, profile.pellets) : [message.direction || {}];
       const origin = { x: current.x, y: current.y, z: current.z };
-      let victim;
-      for (const target of players.values()) {
-        if (target.id !== id && target.alive && distance(current, target) < 90 && rayHits(origin, direction, target)) { victim = target; break; }
+      const victims = new Set();
+      for (const direction of directions) {
+        for (const target of players.values()) {
+          if (target.id !== id && target.alive && distance(current, target) < 90 && rayHits(origin, direction, target)) { victims.add(target); break; }
+        }
       }
-      broadcast({ type: 'shot', shooter: id, origin, direction, victim: victim?.id || null });
-      if (victim) {
-        victim.health -= 34;
+      broadcast({ type: 'shot', shooter: id, origin, directions, victims: [...victims].map(target => target.id), weapon: current.weapon });
+      for (const victim of victims) {
+        victim.health -= profile.damage;
         if (victim.health <= 0) {
           victim.health = 0; victim.alive = false; victim.deaths += 1; current.score += 1;
           broadcast({ type: 'elimination', killer: current.name, victim: victim.name, players: publicState() });
